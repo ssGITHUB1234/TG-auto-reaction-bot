@@ -1,3 +1,4 @@
+// Updated server.js (Supabase-backed) with reaction behavior, notifications, and extra endpoints
 require('dotenv').config();
 const express = require('express');
 const bodyParser = require('body-parser');
@@ -16,19 +17,10 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'change_me';
 const botInstances = new Map(); // botId -> { bot, token }
 
 /**
- * Helper: convert supabase row (array or single) to plain object
+ * Start a bot instance with handlers.
+ * - Adds /start handler (records users).
+ * - Adds message handler to "react" (reply with emoji) when reaction_enabled.
  */
-function normalizeRow(res) {
-  if (!res) return null;
-  // supabase responses: { data, error }
-  if (res.data) {
-    if (Array.isArray(res.data)) return res.data;
-    return res.data;
-  }
-  return null;
-}
-
-// Helper: start a bot and attach handlers
 async function startBot(botRow) {
   if (!botRow || !botRow.token) return;
   const botId = botRow.id;
@@ -36,10 +28,11 @@ async function startBot(botRow) {
 
   const bot = new Telegraf(botRow.token);
 
+  // When a user starts the bot (sends /start)
   bot.start(async (ctx) => {
     try {
       const tUser = ctx.from;
-      // insert into bot_users (if not exists)
+      // Insert user (or ignore if exists)
       await supabase
         .from('bot_users')
         .upsert({
@@ -50,14 +43,44 @@ async function startBot(botRow) {
           last_name: tUser.last_name || ''
         }, { onConflict: ['bot_id', 'telegram_id'] });
 
-      // optional: send force join message
+      // If notify_new_user is enabled for this bot, create a notification record
+      if (botRow.notify_new_user) {
+        await supabase.from('notifications').insert({
+          bot_id: botId,
+          telegram_id: String(tUser.id),
+          username: tUser.username || ''
+        });
+      }
+
+      // If force join is configured, remind the user
       if (botRow.force_join_channel) {
         try {
           await ctx.reply(`Please join this channel first: ${botRow.force_join_channel}`);
-        } catch (err) { /* ignore reply errors */ }
+        } catch (err) {}
       }
     } catch (err) {
       console.error('start handler error', err);
+    }
+  });
+
+  // Message handler -> reply with reaction emoji (acts like reaction)
+  bot.on('message', async (ctx) => {
+    try {
+      // reload bot settings from db in case owner updated them
+      const { data: fresh, error } = await supabase.from('bots').select('*').eq('id', botId).single();
+      if (error || !fresh) return;
+      if (fresh.reaction_enabled) {
+        const emoji = fresh.reaction_emoji || '❤️';
+        try {
+          // Reply to the received message with the emoji
+          await ctx.reply(emoji, { reply_to_message_id: ctx.message.message_id });
+        } catch (err) {
+          // ignore per-message errors
+        }
+      }
+    } catch (err) {
+      // safe ignore
+      console.error('message handler error', err);
     }
   });
 
@@ -75,42 +98,48 @@ async function startBot(botRow) {
   }
 }
 
-// stop bot
 async function stopBot(botId) {
   const inst = botInstances.get(botId);
   if (!inst) return;
   try {
     await inst.bot.stop();
-  } catch (e) { /* ignore */ }
+  } catch (e) {}
   botInstances.delete(botId);
   console.log('Stopped bot', botId);
 }
 
-// On start: load enabled bots
+// bootstrap enabled bots at startup
 async function loadAndStartEnabledBots() {
   const { data, error } = await supabase.from('bots').select('*').eq('enabled', true);
   if (error) {
     console.error('Error loading enabled bots', error);
     return;
   }
-  for (const b of data) {
-    startBot(b);
-  }
+  for (const b of data) startBot(b);
 }
 loadAndStartEnabledBots();
 
-// API
+/* ---------- API ---------- */
 
-// Create a bot (store token, owner, title)
+// Create bot (user pastes token) — immediate start
 app.post('/api/bots', async (req, res) => {
-  const { token, owner, title } = req.body;
+  const { token, owner, title, force_join_channel, notify_new_user, reaction_enabled, reaction_emoji } = req.body;
   if (!token || !owner) return res.status(400).json({ error: 'token and owner required' });
 
-  const payload = { token, owner, title: title || '', enabled: true };
+  const payload = {
+    token,
+    owner,
+    title: title || '',
+    force_join_channel: force_join_channel || null,
+    notify_new_user: !!notify_new_user,
+    reaction_enabled: reaction_enabled === undefined ? true : !!reaction_enabled,
+    reaction_emoji: reaction_emoji || '❤️',
+    enabled: true
+  };
+
   const { data, error } = await supabase.from('bots').insert(payload).select().single();
   if (error) return res.status(500).json({ error: error.message });
 
-  // start it
   await startBot(data);
   res.json({ bot: data });
 });
@@ -125,19 +154,30 @@ app.get('/api/bots', async (req, res) => {
   res.json({ bots: data });
 });
 
-// Toggle bot on/off (owner or admin)
+// Update general settings for a bot (owner or admin)
+app.post('/api/bots/:id/settings', async (req, res) => {
+  const id = Number(req.params.id);
+  const { admin_password, owner, payload } = req.body; // payload: object with fields to update
+  if (!payload || typeof payload !== 'object') return res.status(400).json({ error: 'payload required' });
+
+  const { data: botRow, error: getErr } = await supabase.from('bots').select('*').eq('id', id).single();
+  if (getErr || !botRow) return res.status(404).json({ error: 'bot not found' });
+
+  if (!(admin_password === ADMIN_PASSWORD || owner === botRow.owner)) return res.status(403).json({ error: 'forbidden' });
+
+  const { error } = await supabase.from('bots').update(payload).eq('id', id);
+  if (error) return res.status(500).json({ error: error.message });
+
+  res.json({ ok: true });
+});
+
+// Toggle bot on/off
 app.post('/api/bots/:id/toggle', async (req, res) => {
   const id = Number(req.params.id);
   const { enable, admin_password, owner } = req.body;
-  const { data: botRows, error: getErr } = await supabase.from('bots').select('*').eq('id', id).single();
-  if (getErr || !botRows) return res.status(404).json({ error: 'bot not found' });
-
-  const botRow = botRows;
-
-  // authorize: admin or owner
-  if (!(admin_password === ADMIN_PASSWORD || owner === botRow.owner)) {
-    return res.status(403).json({ error: 'forbidden' });
-  }
+  const { data: botRow, error: getErr } = await supabase.from('bots').select('*').eq('id', id).single();
+  if (getErr || !botRow) return res.status(404).json({ error: 'bot not found' });
+  if (!(admin_password === ADMIN_PASSWORD || owner === botRow.owner)) return res.status(403).json({ error: 'forbidden' });
 
   const { error } = await supabase.from('bots').update({ enabled: enable ? true : false }).eq('id', id);
   if (error) return res.status(500).json({ error: error.message });
@@ -148,17 +188,14 @@ app.post('/api/bots/:id/toggle', async (req, res) => {
   res.json({ ok: true });
 });
 
-// Broadcast message to all users of a bot
+// Broadcast to bot users
 app.post('/api/bots/:id/broadcast', async (req, res) => {
   const id = Number(req.params.id);
   const { message, admin_password, owner } = req.body;
+  if (!message) return res.status(400).json({ error: 'message required' });
   const { data: botRow, error: getErr } = await supabase.from('bots').select('*').eq('id', id).single();
   if (getErr || !botRow) return res.status(404).json({ error: 'bot not found' });
-
-  // authorize: owner or admin
-  if (!(admin_password === ADMIN_PASSWORD || owner === botRow.owner)) {
-    return res.status(403).json({ error: 'forbidden' });
-  }
+  if (!(admin_password === ADMIN_PASSWORD || owner === botRow.owner)) return res.status(403).json({ error: 'forbidden' });
 
   const inst = botInstances.get(id);
   if (!inst) return res.status(400).json({ error: 'bot is not running' });
@@ -171,57 +208,38 @@ app.post('/api/bots/:id/broadcast', async (req, res) => {
     try {
       await inst.bot.telegram.sendMessage(Number(u.telegram_id), message);
       sent++;
-    } catch (err) {
-      // ignore per-user send errors
-    }
+    } catch (err) {}
   }
-
   await supabase.from('broadcasts').insert({ bot_id: id, message });
-
   res.json({ ok: true, attempted: users.length, sent });
 });
 
-// Force-join channel update
-app.post('/api/bots/:id/force_join', async (req, res) => {
-  const id = Number(req.params.id);
-  const { channel, admin_password, owner } = req.body;
-  const { data: botRow, error: getErr } = await supabase.from('bots').select('*').eq('id', id).single();
-  if (getErr || !botRow) return res.status(404).json({ error: 'bot not found' });
-  if (!(admin_password === ADMIN_PASSWORD || owner === botRow.owner)) {
-    return res.status(403).json({ error: 'forbidden' });
-  }
-  const { error } = await supabase.from('bots').update({ force_join_channel: channel }).eq('id', id);
-  if (error) return res.status(500).json({ error: error.message });
-  res.json({ ok: true });
-});
-
-// Get bot stats (users count)
+// Get per-bot stats (total users)
 app.get('/api/bots/:id/stats', async (req, res) => {
   const id = Number(req.params.id);
   const { data: botRow, error: getErr } = await supabase.from('bots').select('*').eq('id', id).single();
   if (getErr || !botRow) return res.status(404).json({ error: 'bot not found' });
 
-  const { data: cnt, error } = await supabase.from('bot_users').select('id', { count: 'exact', head: true }).eq('bot_id', id);
+  const { count, error } = await supabase.from('bot_users').select('id', { count: 'exact', head: true }).eq('bot_id', id);
   if (error) return res.status(500).json({ error: error.message });
 
-  const totalUsers = cnt ?? 0;
+  const totalUsers = count ?? 0;
   res.json({ bot: botRow, stats: { totalUsers } });
 });
 
-// Admin login (simple)
+// Simple admin login
 app.post('/api/admin/login', (req, res) => {
   const { password } = req.body;
   if (password === ADMIN_PASSWORD) return res.json({ ok: true });
   return res.status(401).json({ error: 'invalid' });
 });
 
-// Admin global toggle: control all bots at once
+// Admin: toggle all bots
 app.post('/api/admin/toggle_all', async (req, res) => {
   const { enable, admin_password } = req.body;
   if (admin_password !== ADMIN_PASSWORD) return res.status(403).json({ error: 'forbidden' });
   const { data: bots, error } = await supabase.from('bots').select('*');
   if (error) return res.status(500).json({ error: error.message });
-
   for (const b of bots) {
     await supabase.from('bots').update({ enabled: enable ? true : false }).eq('id', b.id);
     if (enable) startBot(b);
@@ -230,10 +248,42 @@ app.post('/api/admin/toggle_all', async (req, res) => {
   res.json({ ok: true, count: (bots || []).length });
 });
 
+// Admin: fetch notifications (new user starts)
+app.get('/api/admin/notifications', async (req, res) => {
+  const { admin_password } = req.query;
+  if (admin_password !== ADMIN_PASSWORD) return res.status(403).json({ error: 'forbidden' });
+  const { data, error } = await supabase.from('notifications').select('*').order('created_at', { ascending: false }).limit(100);
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ notifications: data });
+});
+
+// Stats endpoint: total bots and per-user counts
+app.get('/api/stats', async (req, res) => {
+  try {
+    const { data: totalResp, error: totalErr } = await supabase.from('bots').select('id', { head: true, count: 'exact' });
+    if (totalErr) return res.status(500).json({ error: totalErr.message });
+    const totalBots = totalResp ?? 0;
+
+    // simple per-user counts
+    const { data: rows, error: groupErr } = await supabase
+      .from('bots')
+      .select('owner, id')
+      .order('owner', { ascending: true });
+
+    if (groupErr) return res.status(500).json({ error: groupErr.message });
+
+    const counts = {};
+    for (const r of rows) counts[r.owner] = (counts[r.owner] || 0) + 1;
+
+    res.json({ totalBots, perUserCounts: counts });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`Server listening on ${PORT}`);
 });
 
-// Graceful shutdown
 process.once('SIGINT', () => process.exit(0));
 process.once('SIGTERM', () => process.exit(0));
