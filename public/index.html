@@ -1,69 +1,156 @@
+```html
 <!doctype html>
 <html>
-<head><meta charset="utf-8"><title>User Dashboard - TG-react</title></head>
+<head>
+<meta charset="utf-8">
+<title>User Dashboard - TG-react</title>
+<style>
+  body { font-family: Arial, sans-serif; padding: 20px; }
+  .bot { border: 1px solid #ddd; padding: 10px; margin-bottom: 8px; }
+</style>
+</head>
 <body>
   <h1>User Dashboard</h1>
+
   <div>
     <label>Your username: <input id="owner" value="" /></label>
     <button id="fetch">Fetch my bots</button>
+    <span id="counts" style="margin-left:20px;"></span>
   </div>
+
+  <h2>Create / Paste Bot Token</h2>
+  <div>
+    <label>Bot Token: <input id="token" style="width:60%" /></label><br/>
+    <label>Title (optional): <input id="title" /></label><br/>
+    <label>Reaction emoji: <input id="reaction_emoji" value="❤️" /></label>
+    <label><input type="checkbox" id="notify_new_user" /> Notify new user starts</label><br/>
+    <label>Force-join channel: <input id="force_join" placeholder="@channel_or_invite" /></label><br/>
+    <button id="create">Create & Start Bot</button>
+    <div id="status" style="color:red;margin-top:10px;"></div>
+  </div>
+
+  <h2>My Bots</h2>
   <div id="bots"></div>
 
-  <script>
-    async function fetchBots(owner){
-      const r = await fetch('/api/bots?owner=' + encodeURIComponent(owner));
-      const j = await r.json();
-      return j.bots;
+<script>
+  async function api(path, opts) {
+    const r = await fetch(path, opts);
+    if (!r.ok) {
+      const txt = await r.text();
+      throw new Error('Status ' + r.status + ' - ' + txt);
     }
-    document.getElementById('fetch').addEventListener('click', async ()=>{
-      const owner = document.getElementById('owner').value.trim();
-      if(!owner) return alert('Enter your owner name (username)');
-      const bots = await fetchBots(owner);
+    return r.json();
+  }
+
+  async function fetchStats() {
+    try {
+      const s = await api('/api/stats');
+      document.getElementById('counts').textContent = `Your bots: - | Total bots: ${s.totalBots}`;
+      return s;
+    } catch (err) {
+      document.getElementById('counts').textContent = 'Stats error';
+    }
+  }
+
+  document.getElementById('fetch').addEventListener('click', async () => {
+    document.getElementById('status').textContent = '';
+    const owner = document.getElementById('owner').value.trim();
+    if (!owner) { document.getElementById('status').textContent = 'Enter owner username'; return; }
+    try {
+      const res = await api('/api/bots?owner=' + encodeURIComponent(owner));
+      const bots = res.bots || [];
       const container = document.getElementById('bots');
       container.innerHTML = '';
-      bots.forEach(b=>{
-        const div = document.createElement('div');
-        div.innerHTML = `<h3>${b.title || 'untitled'} (id:${b.id})</h3>
-          <p>enabled: ${b.enabled}</p>
-          <p>force join: ${b.force_join_channel || '-'}</p>
+      if (!bots.length) container.textContent = 'No bots found for ' + owner;
+      for (const b of bots) {
+        const el = document.createElement('div');
+        el.className = 'bot';
+        el.innerHTML = `<strong>${b.title || 'untitled'} (id:${b.id})</strong><br/>
+          enabled: ${b.enabled} | reaction: ${b.reaction_enabled ? 'on' : 'off'} ${b.reaction_emoji || ''}<br/>
+          force-join: ${b.force_join_channel || '-'}<br/>
           <button data-id="${b.id}" class="toggle">${b.enabled ? 'Turn off' : 'Turn on'}</button>
+          <button data-id="${b.id}" class="edit">Edit</button>
           <button data-id="${b.id}" class="stats">Stats</button>
           <button data-id="${b.id}" class="broadcast">Broadcast</button>
         `;
-        container.appendChild(div);
-      });
-    });
-
-    document.getElementById('bots').addEventListener('click', async (e)=>{
-      const id = e.target.dataset.id;
-      if(!id) return;
-      if(e.target.classList.contains('toggle')){
-        const owner = document.getElementById('owner').value.trim();
-        const enable = e.target.textContent.includes('Turn on');
-        await fetch('/api/bots/' + id + '/toggle', {
-          method: 'POST',
-          headers: {'Content-Type':'application/json'},
-          body: JSON.stringify({ owner, enable })
-        });
-        alert('Toggled. Refreshing...');
-        document.getElementById('fetch').click();
-      } else if(e.target.classList.contains('stats')){
-        const r = await fetch('/api/bots/' + id + '/stats');
-        const j = await r.json();
-        alert('Total users: ' + j.stats.totalUsers);
-      } else if(e.target.classList.contains('broadcast')){
-        const msg = prompt('Message to broadcast:');
-        if(!msg) return;
-        const owner = document.getElementById('owner').value.trim();
-        const r = await fetch('/api/bots/' + id + '/broadcast', {
-          method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ message: msg, owner })
-        });
-        const j = await r.json();
-        if (j.ok) alert('Broadcast sent to ' + j.sent + '/' + j.attempted);
-        else alert('Error: ' + JSON.stringify(j));
+        container.appendChild(el);
       }
-    });
-  </script>
-</body>
-</html>
+      // update counts (simple)
+      const s = await api('/api/stats');
+      const myCount = (s.perUserCounts && s.perUserCounts[owner]) ? s.perUserCounts[owner] : 0;
+      document.getElementById('counts').textContent = `Your bots: ${myCount} | Total bots: ${s.totalBots}`;
+    } catch (err) {
+      document.getElementById('status').textContent = err.message;
+    }
+  });
+
+  // Create bot button
+  document.getElementById('create').addEventListener('click', async () => {
+    const token = document.getElementById('token').value.trim();
+    const owner = document.getElementById('owner').value.trim();
+    if (!token || !owner) { document.getElementById('status').textContent = 'Owner and token required'; return; }
+    const title = document.getElementById('title').value.trim();
+    const reaction_emoji = document.getElementById('reaction_emoji').value || '❤️';
+    const notify_new_user = document.getElementById('notify_new_user').checked;
+    const force_join_channel = document.getElementById('force_join').value.trim() || null;
+    document.getElementById('status').textContent = 'Creating...';
+    try {
+      await api('/api/bots', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ token, owner, title, reaction_emoji, notify_new_user, force_join_channel })
+      });
+      document.getElementById('status').textContent = 'Created and started';
+      document.getElementById('token').value = '';
+      document.getElementById('title').value = '';
+      document.getElementById('force_join').value = '';
+      document.getElementById('notify_new_user').checked = false;
+      setTimeout(() => document.getElementById('fetch').click(), 800);
+    } catch (err) {
+      document.getElementById('status').textContent = 'Error: ' + err.message;
+    }
+  });
+
+  // Delegated buttons in bots container
+  document.getElementById('bots').addEventListener('click', async (e) => {
+    const id = e.target.dataset.id;
+    if (!id) return;
+    const owner = document.getElementById('owner').value.trim();
+    if (e.target.classList.contains('toggle')) {
+      const enable = e.target.textContent.includes('Turn on');
+      await api('/api/bots/' + id + '/toggle', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ owner, enable })
+      });
+      document.getElementById('fetch').click();
+    } else if (e.target.classList.contains('stats')) {
+      const r = await api('/api/bots/' + id + '/stats');
+      alert('Total users: ' + r.stats.totalUsers);
+    } else if (e.target.classList.contains('broadcast')) {
+      const msg = prompt('Message to broadcast:');
+      if (!msg) return;
+      await api('/api/bots/' + id + '/broadcast', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ message: msg, owner })
+      });
+      alert('Broadcast attempted');
+    } else if (e.target.classList.contains('edit')) {
+      const reactionEnabled = confirm('Enable reaction replies? OK = yes, Cancel = no');
+      const emoji = prompt('Reaction emoji (single emoji recommended):', '❤️');
+      const notify = confirm('Notify on new user starts? OK = yes, Cancel = no');
+      const force = prompt('Force-join channel (@channel or invite link)', '');
+      await api('/api/bots/' + id + '/settings', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ owner, payload: { reaction_enabled: !!reactionEnabled, reaction_emoji: emoji || '❤️', notify_new_user: !!notify, force_join_channel: force || null } })
+      });
+      alert('Updated');
+      document.getElementById('fetch').click();
+    }
+  });
+
+  // initial stats fetch
+  fetchStats().catch(()=>{});
+</script>
+```
