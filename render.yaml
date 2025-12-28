@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: tg-auto-reaction-bot
+    env: node
+    envVars:
+      - key: ADMIN_PASSWORD
+        scope: all
+      - key: NODE_ENV
+        value: production
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    instances: 1
