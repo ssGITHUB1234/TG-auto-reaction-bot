@@ -1,4 +1,4 @@
--- Run this SQL in Supabase SQL Editor to create tables for TG-auto-reaction-bot
+-- Run this in Supabase SQL editor. Creates tables and adds fields for reaction behavior & notifications
 
 create table if not exists bots (
   id serial primary key,
@@ -8,6 +8,8 @@ create table if not exists bots (
   enabled boolean default true,
   force_join_channel text,
   notify_new_user boolean default false,
+  reaction_enabled boolean default true,
+  reaction_emoji text default '❤️',
   created_at timestamptz default now()
 );
 
@@ -29,6 +31,15 @@ create table if not exists broadcasts (
   created_at timestamptz default now()
 );
 
--- Optional: indexes
+create table if not exists notifications (
+  id serial primary key,
+  bot_id integer not null references bots (id) on delete cascade,
+  telegram_id text,
+  username text,
+  created_at timestamptz default now(),
+  seen boolean default false
+);
+
 create index if not exists idx_bot_users_botid on bot_users (bot_id);
 create index if not exists idx_broadcasts_botid on broadcasts (bot_id);
+create index if not exists idx_notifications_botid on notifications (bot_id);
