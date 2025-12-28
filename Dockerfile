@@ -1,8 +1,18 @@
+
 FROM node:18-slim
 
 WORKDIR /app
+
+# Copy package JSON and lockfile if present
 COPY package.json package-lock.json* ./
-RUN npm ci --only=production
+
+# If package-lock.json exists use npm ci for reproducible installs,
+# otherwise fall back to npm install. Use --omit=dev to avoid dev deps.
+RUN if [ -f package-lock.json ]; then \
+      npm ci --omit=dev; \
+    else \
+      npm install --omit=dev; \
+    fi
 
 COPY . .
 
