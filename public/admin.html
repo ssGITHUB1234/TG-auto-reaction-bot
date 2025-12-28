@@ -1,0 +1,81 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Admin Dashboard</title></head>
+<body>
+  <h1>Admin Dashboard</h1>
+  <div>
+    <label>Password: <input type="password" id="pw" /></label>
+    <button id="login">Login</button>
+  </div>
+  <div id="main" style="display:none;">
+    <button id="fetchAll">Fetch all bots</button>
+    <button id="toggleAllOn">Enable all</button>
+    <button id="toggleAllOff">Disable all</button>
+    <div id="list"></div>
+  </div>
+
+  <script>
+    let adminPw = null;
+    document.getElementById('login').addEventListener('click', async ()=>{
+      adminPw = document.getElementById('pw').value;
+      const r = await fetch('/api/admin/login', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({password: adminPw})});
+      if (r.ok) {
+        alert('Logged in');
+        document.getElementById('main').style.display = '';
+      } else {
+        alert('Bad password');
+      }
+    });
+
+    async function fetchAll(){
+      const r = await fetch('/api/bots');
+      const j = await r.json();
+      const list = document.getElementById('list');
+      list.innerHTML = '';
+      j.bots.forEach(b=>{
+        const d = document.createElement('div');
+        d.innerHTML = `<h4>${b.title||'untitled'} (id:${b.id}) owner:${b.owner}</h4>
+          <p>enabled:${b.enabled} users: -</p>
+          <button data-id="${b.id}" class="toggle">${b.enabled ? 'Disable' : 'Enable'}</button>
+          <button data-id="${b.id}" class="broadcast">Broadcast</button>
+          <button data-id="${b.id}" class="force">Set force-join</button>
+        `;
+        list.appendChild(d);
+      });
+    }
+
+    document.getElementById('fetchAll').addEventListener('click', fetchAll);
+    document.getElementById('toggleAllOn').addEventListener('click', async ()=>{
+      await fetch('/api/admin/toggle_all', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({enable:true, admin_password: adminPw})});
+      alert('Enabled all');
+      fetchAll();
+    });
+    document.getElementById('toggleAllOff').addEventListener('click', async ()=>{
+      await fetch('/api/admin/toggle_all', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({enable:false, admin_password: adminPw})});
+      alert('Disabled all');
+      fetchAll();
+    });
+
+    document.getElementById('list').addEventListener('click', async (e)=>{
+      const id = e.target.dataset.id;
+      if(!id) return;
+      if(e.target.classList.contains('toggle')){
+        const enable = e.target.textContent.includes('Enable');
+        await fetch('/api/bots/' + id + '/toggle', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({enable, admin_password: adminPw})});
+        fetchAll();
+      } else if(e.target.classList.contains('broadcast')){
+        const msg = prompt('Message to send:');
+        if(!msg) return;
+        await fetch('/api/bots/' + id + '/broadcast', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({message: msg, admin_password: adminPw})});
+        alert('Broadcast attempt complete');
+      } else if(e.target.classList.contains('force')){
+        const channel = prompt('Channel invite or username (e.g. @mychannel):');
+        if(channel === null) return;
+        await fetch('/api/bots/' + id + '/force_join', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({channel, admin_password: adminPw})});
+        alert('Updated force-join');
+        fetchAll();
+      }
+    });
+  </script>
+</body>
+</html>
